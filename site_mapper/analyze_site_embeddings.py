@@ -15,13 +15,12 @@ python analyze_site_embeddings.py results/docs_stripe_com/
 python analyze_site_embeddings.py results/nike/ --output-dir analysis_output/
 """
 
-# Set numba/OpenMP environment before any imports
-import os
-os.environ.setdefault('NUMBA_NUM_THREADS', '1')
-os.environ.setdefault('OMP_NUM_THREADS', '1')
-
 import argparse
 import json
+import os
+from dotenv import load_dotenv
+import google.generativeai as genai
+import openai
 import hashlib
 import re
 from pathlib import Path
@@ -33,16 +32,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.cluster import KMeans
-from sklearn.decomposition import PCA  # fallback if needed
+from sklearn.decomposition import PCA
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import StandardScaler
-
-# Dimensionality reduction
-try:
-    import umap
-    UMAP_AVAILABLE = True
-except Exception:
-    UMAP_AVAILABLE = False
 
 # For visual embeddings
 try:
@@ -57,6 +49,14 @@ except ImportError:
 # For HTML parsing
 from bs4 import BeautifulSoup
 
+# Load environment and configure Gemini
+load_dotenv()
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+GEMINI_MODEL = genai.GenerativeModel('gemini-1.5-pro')
+# Configure OpenAI for text embeddings
+openai.api_key = os.getenv("OPENAI_API_KEY")
+EMBEDDING_MODEL = "text-embedding-ada-002"
+
 class SiteEmbeddingAnalyzer:
     def __init__(self, site_results_path: Path, output_dir: Path = None):
         self.site_results_path = Path(site_results_path)
@@ -68,6 +68,7 @@ class SiteEmbeddingAnalyzer:
         self.structural_embeddings = {}
         self.visual_embeddings = {}
         self.combined_embeddings = {}
+        self.gemini_embeddings = {}
         self.page_metadata = {}
         
         # CLIP model for visual embeddings
@@ -358,6 +359,38 @@ class SiteEmbeddingAnalyzer:
         
         print(f"Generated combined embeddings for {len(self.combined_embeddings)} pages")
     
+    def generate_gemini_embeddings(self):
+        """Generate text embeddings by summarizing HTML with Gemini and embedding with OpenAI"""
+        print("Generating Gemini-based text embeddings...")
+        for page_id, page_info in self.pages.items():
+            # pick HTML file
+            html_file = None
+            for path in page_info['html_files']:
+                if path.name == 'page.html': html_file = path; break
+            if not html_file and page_info['html_files']:
+                html_file = page_info['html_files'][0]
+            if not html_file: continue
+            try:
+                html_text = html_file.read_text(encoding='utf-8')[:20000]
+                prompt = (f"Here is the HTML content of a webpage:\n{html_text}\n\n"
+                          "Describe the page in three concise sentences.")
+                # Generate description via Gemini
+                response = GEMINI_MODEL.generate_content(prompt)
+                desc = response.text
+                # Generate OpenAI text embedding
+                emb_resp = openai.Embedding.create(
+                    input=desc, model=EMBEDDING_MODEL
+                )
+                emb = emb_resp['data'][0]['embedding']
+                self.gemini_embeddings[page_id] = emb
+            except Exception as e:
+                print(f"Error generating Gemini embedding for {page_id}: {e}")
+        # save embeddings
+        out_file = self.output_dir / 'gemini_embeddings.json'
+        with open(out_file, 'w') as f:
+            json.dump(self.gemini_embeddings, f, indent=2)
+        print(f"Saved Gemini embeddings to {out_file}")
+    
     def compute_similarity_matrices(self):
         """Compute similarity matrices for structural and visual embeddings"""
         results = {}
@@ -396,6 +429,18 @@ class SiteEmbeddingAnalyzer:
                 'page_ids': page_ids,
                 'similarity_matrix': combined_sim,
                 'embeddings': embeddings_matrix
+            }
+        
+        # Gemini similarity (text summaries)
+        if self.gemini_embeddings:
+            page_ids = list(self.gemini_embeddings.keys())
+            matrix = cosine_similarity(
+                np.array([self.gemini_embeddings[pid] for pid in page_ids])
+            )
+            results['gemini'] = {
+                'page_ids': page_ids,
+                'similarity_matrix': matrix,
+                'embeddings': None  # too large to store
             }
         
         return results
@@ -474,13 +519,7 @@ class SiteEmbeddingAnalyzer:
             ax = axes[1, 0]
             
             if len(structural_data['embeddings']) > 2:
-                reducer = (umap.UMAP(
-                    n_components=2,
-                    random_state=42,
-                    n_neighbors=max(2, min(10, structural_data['embeddings'].shape[0] - 1)),
-                    n_epochs=200,
-                    metric='cosine')
-                    if UMAP_AVAILABLE else PCA(n_components=2))
+                reducer = PCA(n_components=2)
                 embedding_2d = reducer.fit_transform(structural_data['embeddings'])
                 
                 scatter = ax.scatter(embedding_2d[:, 0], embedding_2d[:, 1], 
@@ -496,10 +535,6 @@ class SiteEmbeddingAnalyzer:
                 ax.set_title('Structural Embeddings (PCA)')
                 ax.set_xlabel('PCA 1')
                 ax.set_ylabel('PCA 2')
-                if UMAP_AVAILABLE:
-                    ax.set_title('Structural Embeddings (UMAP)')
-                    ax.set_xlabel('UMAP 1')
-                    ax.set_ylabel('UMAP 2')
         
         # PCA embeddings for visual data
         if has_visual:
@@ -507,13 +542,7 @@ class SiteEmbeddingAnalyzer:
             ax = axes[1, 1]
             
             if len(visual_data['embeddings']) > 2:
-                reducer = (umap.UMAP(
-                    n_components=2,
-                    random_state=42,
-                    n_neighbors=max(2, min(10, visual_data['embeddings'].shape[0] - 1)),
-                    n_epochs=200,
-                    metric='cosine')
-                    if UMAP_AVAILABLE else PCA(n_components=2))
+                reducer = PCA(n_components=2)
                 embedding_2d = reducer.fit_transform(visual_data['embeddings'])
                 
                 scatter = ax.scatter(embedding_2d[:, 0], embedding_2d[:, 1], 
@@ -529,10 +558,6 @@ class SiteEmbeddingAnalyzer:
                 ax.set_title('Visual Embeddings (PCA)')
                 ax.set_xlabel('PCA 1')
                 ax.set_ylabel('PCA 2')
-                if UMAP_AVAILABLE:
-                    ax.set_title('Visual Embeddings (UMAP)')
-                    ax.set_xlabel('UMAP 1')
-                    ax.set_ylabel('UMAP 2')
         
         # PCA embeddings for combined data
         if has_combined:
@@ -540,13 +565,7 @@ class SiteEmbeddingAnalyzer:
             ax = axes[1, 2]
             
             if len(combined_data['embeddings']) > 2:
-                reducer = (umap.UMAP(
-                    n_components=2,
-                    random_state=42,
-                    n_neighbors=max(2, min(10, combined_data['embeddings'].shape[0] - 1)),
-                    n_epochs=200,
-                    metric='cosine')
-                    if UMAP_AVAILABLE else PCA(n_components=2))
+                reducer = PCA(n_components=2)
                 embedding_2d = reducer.fit_transform(combined_data['embeddings'])
                 
                 scatter = ax.scatter(embedding_2d[:, 0], embedding_2d[:, 1], 
@@ -562,10 +581,6 @@ class SiteEmbeddingAnalyzer:
                 ax.set_title('Combined Embeddings (PCA)')
                 ax.set_xlabel('PCA 1')
                 ax.set_ylabel('PCA 2')
-                if UMAP_AVAILABLE:
-                    ax.set_title('Combined Embeddings (UMAP)')
-                    ax.set_xlabel('UMAP 1')
-                    ax.set_ylabel('UMAP 2')
         
         plt.tight_layout()
         plt.savefig(self.output_dir / 'site_similarity_analysis.png', dpi=300, bbox_inches='tight')
@@ -631,6 +646,7 @@ class SiteEmbeddingAnalyzer:
         self.generate_structural_embeddings()
         self.generate_visual_embeddings()
         self.generate_combined_embeddings()
+        self.generate_gemini_embeddings()
         
         # Compute similarities
         similarity_results = self.compute_similarity_matrices()
