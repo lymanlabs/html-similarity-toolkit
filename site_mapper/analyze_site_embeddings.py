@@ -55,6 +55,7 @@ class SiteEmbeddingAnalyzer:
         self.pages = {}
         self.structural_embeddings = {}
         self.visual_embeddings = {}
+        self.combined_embeddings = {}
         self.page_metadata = {}
         
         # CLIP model for visual embeddings
@@ -299,6 +300,52 @@ class SiteEmbeddingAnalyzer:
         
         print(f"Generated visual embeddings for {len(self.visual_embeddings)} pages")
     
+    def generate_combined_embeddings(self):
+        """Generate combined embeddings from structural and visual data"""
+        if not self.structural_embeddings or not self.visual_embeddings:
+            print("Cannot generate combined embeddings: missing structural or visual data")
+            return
+        
+        print("Generating combined embeddings...")
+        
+        # Find pages that have both structural and visual embeddings
+        common_pages = set(self.structural_embeddings.keys()) & set(self.visual_embeddings.keys())
+        
+        if not common_pages:
+            print("No pages have both structural and visual embeddings")
+            return
+        
+        self.combined_embeddings = {}
+        
+        # Normalize embeddings to same scale before combining
+        structural_data = np.array([self.structural_embeddings[page] for page in common_pages])
+        visual_data = np.array([self.visual_embeddings[page] for page in common_pages])
+        
+        # Standardize both embedding types
+        struct_scaler = StandardScaler()
+        visual_scaler = StandardScaler()
+        
+        structural_normalized = struct_scaler.fit_transform(structural_data)
+        visual_normalized = visual_scaler.fit_transform(visual_data)
+        
+        # Combine embeddings - you can experiment with different combination strategies
+        for i, page in enumerate(common_pages):
+            # Strategy 1: Concatenation (gives equal weight to both)
+            combined = np.concatenate([structural_normalized[i], visual_normalized[i]])
+            
+            # Strategy 2: Weighted average (uncomment to use instead)
+            # structural_weight = 0.6  # Adjust weights as needed
+            # visual_weight = 0.4
+            # # Need to make dimensions compatible for weighted average
+            # min_dims = min(len(structural_normalized[i]), len(visual_normalized[i]))
+            # struct_truncated = structural_normalized[i][:min_dims]
+            # visual_truncated = visual_normalized[i][:min_dims]
+            # combined = structural_weight * struct_truncated + visual_weight * visual_truncated
+            
+            self.combined_embeddings[page] = combined
+        
+        print(f"Generated combined embeddings for {len(self.combined_embeddings)} pages")
+    
     def compute_similarity_matrices(self):
         """Compute similarity matrices for structural and visual embeddings"""
         results = {}
@@ -327,15 +374,36 @@ class SiteEmbeddingAnalyzer:
                 'embeddings': embeddings_matrix
             }
         
+        # Combined similarity
+        if self.combined_embeddings:
+            page_ids = list(self.combined_embeddings.keys())
+            embeddings_matrix = np.array([self.combined_embeddings[pid] for pid in page_ids])
+            combined_sim = cosine_similarity(embeddings_matrix)
+            
+            results['combined'] = {
+                'page_ids': page_ids,
+                'similarity_matrix': combined_sim,
+                'embeddings': embeddings_matrix
+            }
+        
         return results
     
     def create_visualizations(self, similarity_results):
         """Create similarity visualizations"""
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        # Determine grid size based on available data
+        has_structural = 'structural' in similarity_results
+        has_visual = 'visual' in similarity_results
+        has_combined = 'combined' in similarity_results
+        
+        if has_combined:
+            fig, axes = plt.subplots(2, 3, figsize=(24, 12))
+        else:
+            fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+            
         fig.suptitle(f'Site Analysis: {self.site_results_path.name}', fontsize=16)
         
         # Structural similarity heatmap
-        if 'structural' in similarity_results:
+        if has_structural:
             structural_data = similarity_results['structural']
             ax = axes[0, 0]
             
@@ -353,7 +421,7 @@ class SiteEmbeddingAnalyzer:
             ax.tick_params(axis='y', rotation=0)
         
         # Visual similarity heatmap
-        if 'visual' in similarity_results:
+        if has_visual:
             visual_data = similarity_results['visual']
             ax = axes[0, 1]
             
@@ -370,14 +438,33 @@ class SiteEmbeddingAnalyzer:
             ax.tick_params(axis='x', rotation=45)
             ax.tick_params(axis='y', rotation=0)
         
-        # UMAP embeddings for structural data
-        if 'structural' in similarity_results:
+        # Combined similarity heatmap
+        if has_combined:
+            combined_data = similarity_results['combined']
+            ax = axes[0, 2]
+            
+            sns.heatmap(
+                combined_data['similarity_matrix'],
+                xticklabels=[pid[:20] + '...' if len(pid) > 20 else pid for pid in combined_data['page_ids']],
+                yticklabels=[pid[:20] + '...' if len(pid) > 20 else pid for pid in combined_data['page_ids']],
+                annot=True,
+                fmt='.2f',
+                cmap='coolwarm',
+                ax=ax
+            )
+            ax.set_title('Combined Similarity (Structural + Visual)')
+            ax.tick_params(axis='x', rotation=45)
+            ax.tick_params(axis='y', rotation=0)
+        
+        # PCA embeddings for structural data
+        if has_structural:
             structural_data = similarity_results['structural']
+            ax = axes[1, 0]
+            
             if len(structural_data['embeddings']) > 2:
                 reducer = PCA(n_components=2)
                 embedding_2d = reducer.fit_transform(structural_data['embeddings'])
                 
-                ax = axes[1, 0]
                 scatter = ax.scatter(embedding_2d[:, 0], embedding_2d[:, 1], 
                                    c=range(len(structural_data['page_ids'])), 
                                    cmap='tab10', s=100, alpha=0.7)
@@ -392,14 +479,15 @@ class SiteEmbeddingAnalyzer:
                 ax.set_xlabel('PCA 1')
                 ax.set_ylabel('PCA 2')
         
-        # UMAP embeddings for visual data
-        if 'visual' in similarity_results:
+        # PCA embeddings for visual data
+        if has_visual:
             visual_data = similarity_results['visual']
+            ax = axes[1, 1]
+            
             if len(visual_data['embeddings']) > 2:
                 reducer = PCA(n_components=2)
                 embedding_2d = reducer.fit_transform(visual_data['embeddings'])
                 
-                ax = axes[1, 1]
                 scatter = ax.scatter(embedding_2d[:, 0], embedding_2d[:, 1], 
                                    c=range(len(visual_data['page_ids'])), 
                                    cmap='tab10', s=100, alpha=0.7)
@@ -411,6 +499,29 @@ class SiteEmbeddingAnalyzer:
                                xytext=(5, 5), textcoords='offset points', fontsize=8)
                 
                 ax.set_title('Visual Embeddings (PCA)')
+                ax.set_xlabel('PCA 1')
+                ax.set_ylabel('PCA 2')
+        
+        # PCA embeddings for combined data
+        if has_combined:
+            combined_data = similarity_results['combined']
+            ax = axes[1, 2]
+            
+            if len(combined_data['embeddings']) > 2:
+                reducer = PCA(n_components=2)
+                embedding_2d = reducer.fit_transform(combined_data['embeddings'])
+                
+                scatter = ax.scatter(embedding_2d[:, 0], embedding_2d[:, 1], 
+                                   c=range(len(combined_data['page_ids'])), 
+                                   cmap='tab10', s=100, alpha=0.7)
+                
+                # Add labels
+                for i, page_id in enumerate(combined_data['page_ids']):
+                    label = page_id[:15] + '...' if len(page_id) > 15 else page_id
+                    ax.annotate(label, (embedding_2d[i, 0], embedding_2d[i, 1]), 
+                               xytext=(5, 5), textcoords='offset points', fontsize=8)
+                
+                ax.set_title('Combined Embeddings (PCA)')
                 ax.set_xlabel('PCA 1')
                 ax.set_ylabel('PCA 2')
         
@@ -428,10 +539,11 @@ class SiteEmbeddingAnalyzer:
             'total_pages': len(self.pages),
             'pages_with_structural_data': len(self.structural_embeddings),
             'pages_with_visual_data': len(self.visual_embeddings),
+            'pages_with_combined_data': len(self.combined_embeddings),
         }
         
         # Top similar page pairs
-        for analysis_type in ['structural', 'visual']:
+        for analysis_type in ['structural', 'visual', 'combined']:
             if analysis_type in similarity_results:
                 data = similarity_results[analysis_type]
                 sim_matrix = data['similarity_matrix']
@@ -476,6 +588,7 @@ class SiteEmbeddingAnalyzer:
         # Generate embeddings
         self.generate_structural_embeddings()
         self.generate_visual_embeddings()
+        self.generate_combined_embeddings()
         
         # Compute similarities
         similarity_results = self.compute_similarity_matrices()
@@ -489,6 +602,7 @@ class SiteEmbeddingAnalyzer:
         print(f"\nAnalysis complete! Results saved to {self.output_dir}")
         print(f"- Structural embeddings: {len(self.structural_embeddings)} pages")
         print(f"- Visual embeddings: {len(self.visual_embeddings)} pages")
+        print(f"- Combined embeddings: {len(self.combined_embeddings)} pages")
         
         return report
 
