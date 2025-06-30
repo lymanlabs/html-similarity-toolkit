@@ -15,6 +15,11 @@ python analyze_site_embeddings.py results/docs_stripe_com/
 python analyze_site_embeddings.py results/nike/ --output-dir analysis_output/
 """
 
+# Set numba/OpenMP environment before any imports
+import os
+os.environ.setdefault('NUMBA_NUM_THREADS', '1')
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+
 import argparse
 import json
 import hashlib
@@ -28,10 +33,16 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.cluster import KMeans
-from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA  # fallback if needed
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import StandardScaler
+
+# Dimensionality reduction
+try:
+    import umap
+    UMAP_AVAILABLE = True
+except Exception:
+    UMAP_AVAILABLE = False
 
 # For visual embeddings
 try:
@@ -391,13 +402,6 @@ class SiteEmbeddingAnalyzer:
     
     def create_visualizations(self, similarity_results):
         """Create similarity visualizations"""
-        # Helper to get 2-D t-SNE representation with safe perplexity
-        def tsne_2d(matrix):
-            n_samples = matrix.shape[0]
-            perplexity = max(2, min(30, n_samples - 1))
-            tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42, init='pca', learning_rate='auto')
-            return tsne.fit_transform(matrix)
-        
         # Determine grid size based on available data
         has_structural = 'structural' in similarity_results
         has_visual = 'visual' in similarity_results
@@ -470,7 +474,14 @@ class SiteEmbeddingAnalyzer:
             ax = axes[1, 0]
             
             if len(structural_data['embeddings']) > 2:
-                embedding_2d = tsne_2d(structural_data['embeddings'])
+                reducer = (umap.UMAP(
+                    n_components=2,
+                    random_state=42,
+                    n_neighbors=max(2, min(10, structural_data['embeddings'].shape[0] - 1)),
+                    n_epochs=200,
+                    metric='cosine')
+                    if UMAP_AVAILABLE else PCA(n_components=2))
+                embedding_2d = reducer.fit_transform(structural_data['embeddings'])
                 
                 scatter = ax.scatter(embedding_2d[:, 0], embedding_2d[:, 1], 
                                    c=range(len(structural_data['page_ids'])), 
@@ -482,17 +493,28 @@ class SiteEmbeddingAnalyzer:
                     ax.annotate(label, (embedding_2d[i, 0], embedding_2d[i, 1]), 
                                xytext=(5, 5), textcoords='offset points', fontsize=8)
                 
-                ax.set_title('Structural Embeddings (t-SNE)')
-                ax.set_xlabel('t-SNE 1')
-                ax.set_ylabel('t-SNE 2')
+                ax.set_title('Structural Embeddings (PCA)')
+                ax.set_xlabel('PCA 1')
+                ax.set_ylabel('PCA 2')
+                if UMAP_AVAILABLE:
+                    ax.set_title('Structural Embeddings (UMAP)')
+                    ax.set_xlabel('UMAP 1')
+                    ax.set_ylabel('UMAP 2')
         
-        # t-SNE embeddings for visual data
+        # PCA embeddings for visual data
         if has_visual:
             visual_data = similarity_results['visual']
             ax = axes[1, 1]
             
             if len(visual_data['embeddings']) > 2:
-                embedding_2d = tsne_2d(visual_data['embeddings'])
+                reducer = (umap.UMAP(
+                    n_components=2,
+                    random_state=42,
+                    n_neighbors=max(2, min(10, visual_data['embeddings'].shape[0] - 1)),
+                    n_epochs=200,
+                    metric='cosine')
+                    if UMAP_AVAILABLE else PCA(n_components=2))
+                embedding_2d = reducer.fit_transform(visual_data['embeddings'])
                 
                 scatter = ax.scatter(embedding_2d[:, 0], embedding_2d[:, 1], 
                                    c=range(len(visual_data['page_ids'])), 
@@ -504,9 +526,13 @@ class SiteEmbeddingAnalyzer:
                     ax.annotate(label, (embedding_2d[i, 0], embedding_2d[i, 1]), 
                                xytext=(5, 5), textcoords='offset points', fontsize=8)
                 
-                ax.set_title('Visual Embeddings (t-SNE)')
-                ax.set_xlabel('t-SNE 1')
-                ax.set_ylabel('t-SNE 2')
+                ax.set_title('Visual Embeddings (PCA)')
+                ax.set_xlabel('PCA 1')
+                ax.set_ylabel('PCA 2')
+                if UMAP_AVAILABLE:
+                    ax.set_title('Visual Embeddings (UMAP)')
+                    ax.set_xlabel('UMAP 1')
+                    ax.set_ylabel('UMAP 2')
         
         # PCA embeddings for combined data
         if has_combined:
@@ -514,7 +540,14 @@ class SiteEmbeddingAnalyzer:
             ax = axes[1, 2]
             
             if len(combined_data['embeddings']) > 2:
-                embedding_2d = tsne_2d(combined_data['embeddings'])
+                reducer = (umap.UMAP(
+                    n_components=2,
+                    random_state=42,
+                    n_neighbors=max(2, min(10, combined_data['embeddings'].shape[0] - 1)),
+                    n_epochs=200,
+                    metric='cosine')
+                    if UMAP_AVAILABLE else PCA(n_components=2))
+                embedding_2d = reducer.fit_transform(combined_data['embeddings'])
                 
                 scatter = ax.scatter(embedding_2d[:, 0], embedding_2d[:, 1], 
                                    c=range(len(combined_data['page_ids'])), 
@@ -526,9 +559,13 @@ class SiteEmbeddingAnalyzer:
                     ax.annotate(label, (embedding_2d[i, 0], embedding_2d[i, 1]), 
                                xytext=(5, 5), textcoords='offset points', fontsize=8)
                 
-                ax.set_title('Combined Embeddings (t-SNE)')
-                ax.set_xlabel('t-SNE 1')
-                ax.set_ylabel('t-SNE 2')
+                ax.set_title('Combined Embeddings (PCA)')
+                ax.set_xlabel('PCA 1')
+                ax.set_ylabel('PCA 2')
+                if UMAP_AVAILABLE:
+                    ax.set_title('Combined Embeddings (UMAP)')
+                    ax.set_xlabel('UMAP 1')
+                    ax.set_ylabel('UMAP 2')
         
         plt.tight_layout()
         plt.savefig(self.output_dir / 'site_similarity_analysis.png', dpi=300, bbox_inches='tight')
